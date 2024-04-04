@@ -1,21 +1,20 @@
 mod api;
 use api::read_swap_params;
 
-use clap::Parser;
 use anyhow::anyhow;
+use clap::Parser;
 use env_logger::Env;
 use futures::future::join_all;
 use log::{debug, error, info};
 
 use raydium_contract_instructions::amm_instruction as amm;
 
-use solana_transaction_status::option_serializer::OptionSerializer;
+pub const COMPUTE_UNIT_PRICE: u64 = 1_400_000;
+pub const COMPUTE_UNIT_LIMIT: u32 = 400_000;
+
 use std::sync::Arc;
 
-use solana_client::{
-    nonblocking::rpc_client::RpcClient,
-    rpc_config::RpcSendTransactionConfig
-};
+use solana_client::rpc_config::RpcSendTransactionConfig;
 
 use solana_sdk::{
     commitment_config::CommitmentConfig,
@@ -29,9 +28,12 @@ use api::SwapParams;
 use tokio::sync::RwLock;
 use tokio::time::Duration;
 
-use spl_token_client::token::{Token, TokenError};
+use spl_token_client::{
+    output,
+    token::{Token, TokenError},
+};
 
-use crate::api::log_transaction;
+use crate::api::{base_unit, log_transaction};
 
 #[derive(Debug, Parser)]
 pub struct Cli {
@@ -42,7 +44,11 @@ pub struct Cli {
 #[derive(Debug, Parser)]
 pub enum Command {
     Swap {
-        #[arg(long, help = "Path to configuration file", default_value = "settings.json")]
+        #[arg(
+            long,
+            help = "Path to configuration file",
+            default_value = "settings.json"
+        )]
         configuration_file: String,
         #[arg(long, help = "Path to pools cache", default_value = "pool_cache.json")]
         pools: String,
@@ -51,6 +57,7 @@ pub enum Command {
         #[arg(long, help = "Path to output file", default_value = "pool_cache.json")]
         output_file: String,
     },
+    Exchange,
 }
 
 #[tokio::main]
@@ -72,10 +79,91 @@ async fn main() -> anyhow::Result<()> {
         Command::CachePools { output_file } => {
             fetch_pools(&output_file).await?;
         }
+        Command::Exchange => {
+            exchange_rate("settings.json", "pool_cache.json").await?;
+        }
     }
 
     Ok(())
 }
+
+async fn exchange_rate(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
+    let swap_params: SwapParams = read_swap_params(&configuration_file).await?;
+
+    let keypair = Keypair::read_from_file(&swap_params.keypair).map_err(|_| {
+        error!("Failed to read keypair from path={}", configuration_file);
+        anyhow::anyhow!("failed reading keypair from path {}", configuration_file)
+    })?;
+
+    info!(
+        "Read keypair from {} successfully. Address: {}",
+        configuration_file,
+        keypair.pubkey().to_string()
+    );
+
+    let client = api::rpc(&swap_params.rpc_url);
+    let program_client = api::program_rpc(Arc::clone(&client));
+    let in_token_client = Token::new(
+        Arc::clone(&program_client),
+        &spl_token::ID,
+        &swap_params.in_token,
+        None,
+        Arc::new(api::keypair_clone(&keypair)),
+    )
+    .with_compute_unit_price(COMPUTE_UNIT_PRICE)
+    .with_compute_unit_limit(COMPUTE_UNIT_LIMIT);
+
+    let out_token_client = Token::new(
+        Arc::clone(&program_client),
+        &spl_token::ID,
+        &swap_params.out_token,
+        None,
+        Arc::new(api::keypair_clone(&keypair)),
+    );
+
+    let in_token_price = api::get_price(&swap_params.in_token, &None).await?;
+    info!("Current price of 1 input token= {} USD", in_token_price);
+
+    let out_token_price = api::get_price(&swap_params.out_token, &None).await?;
+    info!("Current price of 1 output token= {} USD", out_token_price);
+
+    let input_decimals = in_token_client.get_mint_info().await?.base.decimals;
+    debug!("input_decimals: {}", input_decimals);
+
+    let output_decimals = out_token_client.get_mint_info().await?.base.decimals;
+    debug!("output_decimals: {}", output_decimals);
+
+    let out_in_rate = out_token_price / in_token_price;
+    let swap_amount_in = swap_params.amount_in;
+    let expected_output_amt = (swap_amount_in as f64 / base_unit(input_decimals)) / out_in_rate;
+
+    debug!(
+        "in_price={} out_price={} in_out_rate={} swap_amount_in={} expected_output_amt={}",
+        in_token_price, out_token_price, out_in_rate, swap_amount_in as f64, expected_output_amt
+    );
+
+    if swap_params.slippage > 100.0 {
+        error!("Invalid slippage percentage. > 100");
+        return Err(anyhow!("Invalid slippage percentage. >100"));
+    }
+    let out_factor = ((100.0 - swap_params.slippage) / 100.0) as f64;
+
+    let min_expected_out = ((expected_output_amt * out_factor) * base_unit(output_decimals)) as u64;
+
+    debug!("min_expected_out ={}", min_expected_out);
+
+    debug!("out_factor={}", out_factor);
+
+    info!(
+        "Exchange {} input tokens for {} output",
+        swap_amount_in as f64 / base_unit(input_decimals),
+        min_expected_out as f64 / base_unit(output_decimals)
+    );
+
+    Ok(())
+}
+
+
 
 async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
     let swap_params: SwapParams = read_swap_params(&configuration_file).await?;
@@ -126,8 +214,8 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
         None,
         Arc::new(api::keypair_clone(&keypair)),
     )
-    .with_compute_unit_price(400_000)
-    .with_compute_unit_limit(400_000);
+    .with_compute_unit_price(COMPUTE_UNIT_PRICE)
+    .with_compute_unit_limit(COMPUTE_UNIT_LIMIT);
 
     let out_token_client = Token::new(
         Arc::clone(&program_client),
@@ -181,10 +269,14 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
         info!("From {} To => {}", &user, &user_in_token_account);
 
         let budget_ins =
-            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(400_000);
+            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(
+                COMPUTE_UNIT_LIMIT,
+            );
 
         let price_ins =
-            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(400_000);
+            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(
+                COMPUTE_UNIT_PRICE,
+            );
 
         let transfer_instruction =
             solana_sdk::system_instruction::transfer(&user, &user_in_token_account, transfer_amt);
@@ -245,9 +337,7 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
     info!("input_decimals: {}", input_decimals);
 
     let output_decimals = out_token_client.get_mint_info().await?.base.decimals;
-    let base: f64 = 10.0;
-    let exponent = input_decimals;
-    let result: f64 = base.powf(exponent as f64);
+    let result: f64 = base_unit(input_decimals);
 
     let out_in_rate = out_token_price / in_token_price;
     let swap_amount_in = swap_params.amount_in;
@@ -264,21 +354,25 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
     }
     let out_factor = ((100.0 - swap_params.slippage) / 100.0) as f64;
 
-    let min_expected_out =
-        ((expected_output_amt * out_factor) * base.powf(output_decimals as f64)) as u64;
+    let min_expected_out = ((expected_output_amt * out_factor) * base_unit(output_decimals)) as u64;
+
     info!("min_expected_out ={}", min_expected_out);
 
     debug!("out_factor={}", out_factor);
 
     info!(
         "Initiating swap of {} input tokens for {} output. Rate={} input-tokens/1 output-token",
-        swap_amount_in, min_expected_out, out_in_rate
+        swap_amount_in as f64 / base_unit(input_decimals),
+        min_expected_out as f64 / base_unit(output_decimals),
+        out_in_rate
     );
 
-    let budget_ins =
-        solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(400_000);
-    let price_ins =
-        solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(400_000);
+    let budget_ins = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(
+        COMPUTE_UNIT_LIMIT,
+    );
+    let price_ins = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(
+        COMPUTE_UNIT_PRICE,
+    );
 
     instructions.push(budget_ins);
     instructions.push(price_ins);
@@ -408,8 +502,7 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
                 if let Err(e) = result {
                     println!("A task encountered an error: {}", e);
                 }
-
-            },
+            }
             Err(e) => println!("A task encountered an error: {}", e),
         }
     }
@@ -418,8 +511,6 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
 
     Ok(())
 }
-
-
 
 async fn fetch_pools(output_file: &str) -> anyhow::Result<()> {
     let pool_info = api::fetch_all_liquidity_pools().await?;

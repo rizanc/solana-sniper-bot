@@ -1,7 +1,7 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use log::{debug, error, info};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::signature::{Keypair, Signature};
 
@@ -144,7 +144,7 @@ fn deserialize_price_info(value: serde_json::Value) -> anyhow::Result<HashMap<St
 
 pub async fn fetch_all_prices() -> anyhow::Result<HashMap<String, f64>> {
     debug!("fn: fetch_all_prices");
-    info!(
+    debug!(
         "Fetching price infos from raydium api endpoint={}",
         RAYDIUM_PRICE_INFO_ENDPOINT
     );
@@ -161,7 +161,7 @@ pub async fn get_price(token: &Pubkey, cache_path: &Option<String>) -> anyhow::R
         token, cache_path
     );
     let pools = if let Some(path) = cache_path {
-        info!("Fetching price-information from price-cache. path={}", path);
+        debug!("Fetching price-information from price-cache. path={}", path);
         deserialize_price_info(serde_json::from_str(&std::fs::read_to_string(path)?)?)?
     } else {
         fetch_all_prices().await?
@@ -192,7 +192,7 @@ pub async fn get_pool_info(
         token_a, token_b, cache_path
     );
     let pools = if let Some(path) = cache_path {
-        info!("Fetching liq-pool-infos from pool-cache. path={}", path);
+        debug!("Fetching liq-pool-infos from pool-cache. path={}", path);
         serde_json::from_str(&std::fs::read_to_string(path)?)?
     } else {
         fetch_all_liquidity_pools().await?
@@ -272,4 +272,10 @@ pub async fn log_transaction(signature: &Signature) {
         error!("Waiting for Transaction Status. Retrying in 1 second");
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+pub fn base_unit(input_decimals: u8) -> f64 {
+    let base: f64 = 10.0;
+    let exponent = input_decimals;
+    base.powf(exponent as f64)
 }

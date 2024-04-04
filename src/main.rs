@@ -57,7 +57,14 @@ pub enum Command {
         #[arg(long, help = "Path to output file", default_value = "pool_cache.json")]
         output_file: String,
     },
-    Exchange,
+    Exchange{
+        #[arg(
+            long,
+            help = "Path to configuration file",
+            default_value = "settings.json"
+        )]
+        configuration_file: String,
+    },
 }
 
 #[tokio::main]
@@ -79,15 +86,17 @@ async fn main() -> anyhow::Result<()> {
         Command::CachePools { output_file } => {
             fetch_pools(&output_file).await?;
         }
-        Command::Exchange => {
-            exchange_rate("settings.json", "pool_cache.json").await?;
+        Command::Exchange {
+            configuration_file
+        } => {
+            exchange_rate(&configuration_file).await?;
         }
     }
 
     Ok(())
 }
 
-async fn exchange_rate(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
+async fn exchange_rate(configuration_file: &str) -> anyhow::Result<()> {
     let swap_params: SwapParams = read_swap_params(&configuration_file).await?;
 
     let keypair = Keypair::read_from_file(&swap_params.keypair).map_err(|_| {
@@ -361,7 +370,7 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
     debug!("out_factor={}", out_factor);
 
     info!(
-        "Initiating swap of {} input tokens for {} output. Rate={} input-tokens/1 output-token",
+        "Initiating swap of {} input tokens for {} output. Rate= {} input-tokens/1 output-token",
         swap_amount_in as f64 / base_unit(input_decimals),
         min_expected_out as f64 / base_unit(output_decimals),
         out_in_rate

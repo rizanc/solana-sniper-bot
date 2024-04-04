@@ -24,14 +24,11 @@ use solana_sdk::{
     transaction::Transaction,
 };
 
-use api::SwapParams;
+use api::Settings;
 use tokio::sync::RwLock;
 use tokio::time::Duration;
 
-use spl_token_client::{
-    output,
-    token::{Token, TokenError},
-};
+use spl_token_client::token::{Token, TokenError};
 
 use crate::api::{base_unit, log_transaction};
 
@@ -51,20 +48,20 @@ pub enum Command {
         )]
         configuration_file: String,
         #[arg(long, help = "Path to pools cache", default_value = "pool_cache.json")]
-        pools: String,
+        pools: String
     },
     CachePools {
         #[arg(long, help = "Path to output file", default_value = "pool_cache.json")]
-        output_file: String,
+        output_file: String
     },
-    Exchange{
+    Exchange {
         #[arg(
             long,
             help = "Path to configuration file",
             default_value = "settings.json"
         )]
-        configuration_file: String,
-    },
+        configuration_file: String
+    }
 }
 
 #[tokio::main]
@@ -86,9 +83,7 @@ async fn main() -> anyhow::Result<()> {
         Command::CachePools { output_file } => {
             fetch_pools(&output_file).await?;
         }
-        Command::Exchange {
-            configuration_file
-        } => {
+        Command::Exchange { configuration_file } => {
             exchange_rate(&configuration_file).await?;
         }
     }
@@ -97,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn exchange_rate(configuration_file: &str) -> anyhow::Result<()> {
-    let swap_params: SwapParams = read_swap_params(&configuration_file).await?;
+    let swap_params: Settings = read_swap_params(&configuration_file).await?;
 
     let keypair = Keypair::read_from_file(&swap_params.keypair).map_err(|_| {
         error!("Failed to read keypair from path={}", configuration_file);
@@ -130,10 +125,10 @@ async fn exchange_rate(configuration_file: &str) -> anyhow::Result<()> {
         Arc::new(api::keypair_clone(&keypair)),
     );
 
-    let in_token_price = api::get_price(&swap_params.in_token, &None).await?;
+    let in_token_price = api::get_price_birdeye(&swap_params.in_token, &swap_params.birdeye_key).await?;
     info!("Current price of 1 input token= {} USD", in_token_price);
 
-    let out_token_price = api::get_price(&swap_params.out_token, &None).await?;
+    let out_token_price = api::get_price_birdeye(&swap_params.out_token, &swap_params.birdeye_key).await?;
     info!("Current price of 1 output token= {} USD", out_token_price);
 
     let input_decimals = in_token_client.get_mint_info().await?.base.decimals;
@@ -172,10 +167,8 @@ async fn exchange_rate(configuration_file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-
-
 async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
-    let swap_params: SwapParams = read_swap_params(&configuration_file).await?;
+    let swap_params: Settings = read_swap_params(&configuration_file).await?;
 
     let keypair = Keypair::read_from_file(&swap_params.keypair).map_err(|_| {
         error!("Failed to read keypair from path={}", configuration_file);
@@ -334,11 +327,11 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
         Err(error) => error!("Error retrieving user's output-tokens ATA: {}", error),
     }
 
-    let in_token_price = api::get_price(&swap_params.in_token, &None).await?;
-    info!("Current price of 1 input token={} USD", in_token_price);
+    let in_token_price = api::get_price_birdeye(&swap_params.in_token, &swap_params.birdeye_key).await?;
+    info!("Current price of 1 input token= {} USD", in_token_price);
 
-    let out_token_price = api::get_price(&swap_params.out_token, &None).await?;
-    info!("Current price of 1 output token={} USD", out_token_price);
+    let out_token_price = api::get_price_birdeye(&swap_params.out_token, &swap_params.birdeye_key).await?;
+    info!("Current price of 1 output token= {} USD", out_token_price);
 
     let mut instructions: Vec<Instruction> = vec![];
 

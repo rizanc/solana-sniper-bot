@@ -1,6 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use log::{debug, error, info};
+use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::ClientBuilder;
 use serde::{Deserialize, Serialize};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::signature::{Keypair, Signature};
@@ -11,7 +13,7 @@ use spl_token_client::client::{ProgramClient, ProgramRpcClient, ProgramRpcClient
 use tokio::{fs::File, io::AsyncReadExt};
 
 pub const RAYDIUM_POOL_INFO_ENDPOINT: &str = "https://api.raydium.io/v2/sdk/liquidity/mainnet.json";
-pub const RAYDIUM_PRICE_INFO_ENDPOINT: &str = "https://api.raydium.io/v2/main/price";
+pub const BIRDEYE_API_ENDPOINT: &str = "https://public-api.birdeye.so/public/price?address=";
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct LiqPoolInformation {
@@ -93,8 +95,22 @@ pub mod pubkey {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BirdEyeResponse {
+    pub data: Option<BirdEyeData>,
+    pub message: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BirdEyeData {
+    value: f64,
+    #[serde(rename = "updateUnixTime")]
+    update_unix_time: u64,
+    #[serde(rename = "updateHumanTime")]
+    update_human_time: String,
+}
+
 #[derive(Debug, Deserialize)]
-pub struct SwapParams {
+pub struct Settings {
     pub keypair: String,
     #[serde(with = "pubkey")]
     pub in_token: Pubkey,
@@ -104,9 +120,10 @@ pub struct SwapParams {
     pub slippage: f32,
     pub threads: u8,
     pub rpc_url: String,
+    pub birdeye_key: String,
 }
 
-pub async fn read_swap_params(path: &str) -> anyhow::Result<SwapParams> {
+pub async fn read_swap_params(path: &str) -> anyhow::Result<Settings> {
     // Open the file in read-only mode
     let mut file = File::open(path).await?;
 
@@ -115,7 +132,7 @@ pub async fn read_swap_params(path: &str) -> anyhow::Result<SwapParams> {
     file.read_to_string(&mut contents).await?;
 
     // Deserialize the JSON string into SwapParams
-    let swap_params: SwapParams = serde_json::from_str(&contents)?;
+    let swap_params: Settings = serde_json::from_str(&contents)?;
 
     Ok(swap_params)
 }
@@ -132,53 +149,39 @@ pub async fn fetch_all_liquidity_pools() -> anyhow::Result<LiqPoolInformation> {
         .await?)
 }
 
-fn deserialize_price_info(value: serde_json::Value) -> anyhow::Result<HashMap<String, f64>> {
-    debug!("fn: deserialize_price_info(value={})", value);
-    Ok(value
-        .as_object()
-        .ok_or(anyhow::format_err!("malformed content. expected object."))?
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), v.as_f64().expect("value is f64")))
-        .collect())
-}
+pub async fn get_price_birdeye(token: &Pubkey, key: &str) -> anyhow::Result<f64> {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-api-key", HeaderValue::from_str(key)?);
 
-pub async fn fetch_all_prices() -> anyhow::Result<HashMap<String, f64>> {
-    debug!("fn: fetch_all_prices");
-    debug!(
-        "Fetching price infos from raydium api endpoint={}",
-        RAYDIUM_PRICE_INFO_ENDPOINT
-    );
-    let price_info_result: serde_json::Value = reqwest::get(RAYDIUM_PRICE_INFO_ENDPOINT)
+    let result = ClientBuilder::new()
+        .default_headers(headers)
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap()
+        .get(format!("{}{}", BIRDEYE_API_ENDPOINT, token.to_string()))
+        .send()
         .await?
-        .json()
-        .await?;
-    deserialize_price_info(price_info_result)
-}
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch price from birdeye: {}", e))?;
 
-pub async fn get_price(token: &Pubkey, cache_path: &Option<String>) -> anyhow::Result<f64> {
-    debug!(
-        "fn: get_price(token = {},cache_path = {:?})",
-        token, cache_path
-    );
-    let pools = if let Some(path) = cache_path {
-        debug!("Fetching price-information from price-cache. path={}", path);
-        deserialize_price_info(serde_json::from_str(&std::fs::read_to_string(path)?)?)?
-    } else {
-        fetch_all_prices().await?
-    };
+    let response = serde_json::from_value::<BirdEyeResponse>(result)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize birdeye response: {}", e))?;
 
-    pools
-        .into_iter()
-        .find_map(|(tok, price)| {
-            if token.to_string() == *tok {
-                return Some(price);
+    match response.data {
+        None => {
+            if let Some(message) = response.message {
+                return Err(anyhow::anyhow!(
+                    "Failed to fetch price from birdeye: {}",
+                    message
+                ));
             }
-            None
-        })
-        .ok_or_else(|| {
-            error!("Failed to find price for token {}", token);
-            anyhow::anyhow!("Failed to find price for token {}", token)
-        })
+            return Err(anyhow::anyhow!("Failed to fetch price from birdeye"));
+        }
+        Some(data) => {
+            return Ok(data.value);
+        }
+    }
 }
 
 pub async fn get_pool_info(

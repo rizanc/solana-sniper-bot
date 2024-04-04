@@ -50,4 +50,11 @@ Options:
 
 ### TODO
 
-Subscribe to Raydium pool events and 
+Subscribe to Raydium pool events.
+Dynamic fees
+Robust transaction status handling (retry, fee calculation)
+Automatic and optimized slippage adjustment
+Pool liquidity and price impact
+Ability to automatically provide/remove liquidity
+
+

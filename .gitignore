@@ -1,0 +1,10 @@
+/target
+crm.json
+pair.json
+pair copy.json
+pools.json
+swap.json
+Cargo.lock
+cached.json
+settings.json
+pool_cache.json

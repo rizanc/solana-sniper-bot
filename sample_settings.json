@@ -1,0 +1,9 @@
+{
+    "keypair": "pair.json",
+    "in_token": "So11111111111111111111111111111111111111112",
+    "out_token": "bobaM3u8QmqZhY1HwAtnvze9DLXvkgKYk3td3t8MLva",
+    "amount_in": 100000000,
+    "slippage": 0.05,
+    "threads": 1,
+    "rpc_url": "https://api.mainnet-beta.solana.com"
+}

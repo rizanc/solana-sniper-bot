@@ -9,16 +9,19 @@ use log::{debug, error, info};
 
 use raydium_contract_instructions::amm_instruction as amm;
 
-pub const COMPUTE_UNIT_PRICE: u64 = 1_400_000;
-pub const COMPUTE_UNIT_LIMIT: u32 = 400_000;
+pub const COMPUTE_UNIT_PRICE: u64 = 150_000;
+pub const COMPUTE_UNIT_LIMIT: u32 = 150_969;
 
-use std::sync::Arc;
+use std::{sync::Arc, vec};
 
-use solana_client::rpc_config::RpcSendTransactionConfig;
+use solana_client::{
+    nonblocking::rpc_client::RpcClient, rpc_config::RpcSendTransactionConfig, rpc_request::RpcError,
+};
 
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     instruction::Instruction,
+    pubkey::Pubkey,
     signature::Keypair,
     signer::{EncodableKey, Signer},
     transaction::Transaction,
@@ -48,11 +51,11 @@ pub enum Command {
         )]
         configuration_file: String,
         #[arg(long, help = "Path to pools cache", default_value = "pool_cache.json")]
-        pools: String
+        pools: String,
     },
     CachePools {
         #[arg(long, help = "Path to output file", default_value = "pool_cache.json")]
-        output_file: String
+        output_file: String,
     },
     Exchange {
         #[arg(
@@ -60,8 +63,8 @@ pub enum Command {
             help = "Path to configuration file",
             default_value = "settings.json"
         )]
-        configuration_file: String
-    }
+        configuration_file: String,
+    },
 }
 
 #[tokio::main]
@@ -125,10 +128,12 @@ async fn exchange_rate(configuration_file: &str) -> anyhow::Result<()> {
         Arc::new(api::keypair_clone(&keypair)),
     );
 
-    let in_token_price = api::get_price_birdeye(&swap_params.in_token, &swap_params.birdeye_key).await?;
+    let in_token_price =
+        api::get_price_birdeye(&swap_params.in_token, &swap_params.birdeye_key).await?;
     info!("Current price of 1 input token= {} USD", in_token_price);
 
-    let out_token_price = api::get_price_birdeye(&swap_params.out_token, &swap_params.birdeye_key).await?;
+    let out_token_price =
+        api::get_price_birdeye(&swap_params.out_token, &swap_params.birdeye_key).await?;
     info!("Current price of 1 output token= {} USD", out_token_price);
 
     let input_decimals = in_token_client.get_mint_info().await?.base.decimals;
@@ -206,8 +211,15 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
     };
     debug!("Retrieved pool_info={:?}", pool_info);
 
-    let client = api::rpc(&swap_params.rpc_url);
-    let program_client = api::program_rpc(Arc::clone(&client));
+    let mut instructions = initialize_instructions(&user).await;
+
+    let client =
+        RpcClient::new_with_commitment(swap_params.rpc_url.clone(), CommitmentConfig::confirmed());
+
+    let program_client = api::program_rpc(Arc::new(client));
+
+    let client =
+        RpcClient::new_with_commitment(swap_params.rpc_url.clone(), CommitmentConfig::finalized());
 
     let in_token_client = Token::new(
         Arc::clone(&program_client),
@@ -225,7 +237,8 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
         &swap_params.out_token,
         None,
         Arc::new(api::keypair_clone(&keypair)),
-    );
+    ).with_compute_unit_price(COMPUTE_UNIT_PRICE)
+    .with_compute_unit_limit(COMPUTE_UNIT_LIMIT);
 
     let user_in_token_account = in_token_client.get_associated_token_address(&user);
     info!("User input-tokens ATA={}", user_in_token_account);
@@ -270,44 +283,14 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
         info!("Transfering {} native tokens to user's ATA", transfer_amt);
         info!("From {} To => {}", &user, &user_in_token_account);
 
-        let budget_ins =
-            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(
-                COMPUTE_UNIT_LIMIT,
-            );
-
-        let price_ins =
-            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(
-                COMPUTE_UNIT_PRICE,
-            );
-
         let transfer_instruction =
             solana_sdk::system_instruction::transfer(&user, &user_in_token_account, transfer_amt);
 
         let sync_instruction =
             spl_token::instruction::sync_native(&spl_token::ID, &user_in_token_account)?;
 
-        let blockhash = client.get_latest_blockhash().await?;
-
-        let tx = Transaction::new_signed_with_payer(
-            &[
-                price_ins,
-                budget_ins,
-                transfer_instruction,
-                sync_instruction,
-            ],
-            Some(&user),
-            &[&keypair],
-            blockhash,
-        );
-
-        match client.send_and_confirm_transaction(&tx).await {
-            Ok(_) => info!("Transfered native tokens to user's ATA"),
-            Err(_) => {
-                log_transaction(&tx.signatures[0]).await;
-
-                return Err(anyhow!("Error transfering native tokens to user's ATA"));
-            }
-        };
+        instructions.push(transfer_instruction);
+        instructions.push(sync_instruction);
     }
 
     let user_out_token_account = out_token_client.get_associated_token_address(&user);
@@ -320,20 +303,23 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
         Ok(_) => debug!("User's ATA for output tokens exists. Skipping creation.."),
         Err(TokenError::AccountNotFound) | Err(TokenError::AccountInvalidOwner) => {
             info!("User's output-tokens ATA does not exist. Creating..");
-            out_token_client
+            while let Err(e) = out_token_client
                 .create_associated_token_account(&user)
-                .await?;
+                .await
+            {
+                error!("Error creating user's output-tokens ATA: {}", e);
+            }
         }
         Err(error) => error!("Error retrieving user's output-tokens ATA: {}", error),
     }
 
-    let in_token_price = api::get_price_birdeye(&swap_params.in_token, &swap_params.birdeye_key).await?;
+    let in_token_price =
+        api::get_price_birdeye(&swap_params.in_token, &swap_params.birdeye_key).await?;
     info!("Current price of 1 input token= {} USD", in_token_price);
 
-    let out_token_price = api::get_price_birdeye(&swap_params.out_token, &swap_params.birdeye_key).await?;
+    let out_token_price =
+        api::get_price_birdeye(&swap_params.out_token, &swap_params.birdeye_key).await?;
     info!("Current price of 1 output token= {} USD", out_token_price);
-
-    let mut instructions: Vec<Instruction> = vec![];
 
     let input_decimals = in_token_client.get_mint_info().await?.base.decimals;
     info!("input_decimals: {}", input_decimals);
@@ -368,16 +354,6 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
         min_expected_out as f64 / base_unit(output_decimals),
         out_in_rate
     );
-
-    let budget_ins = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(
-        COMPUTE_UNIT_LIMIT,
-    );
-    let price_ins = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(
-        COMPUTE_UNIT_PRICE,
-    );
-
-    instructions.push(budget_ins);
-    instructions.push(price_ins);
 
     if pool_info.base_mint == swap_params.in_token {
         info!(
@@ -458,12 +434,15 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
         let t1 = tokio::spawn(async move {
             let instructions = instructions_arc_clone.read().await;
             let keypair = key_pair_arc_clone.read().await;
-            let recent_blockhash = client_arc_clone
+
+            let (recent_blockhash, lastValidBlockHeight) = client_arc_clone
                 .read()
                 .await
-                .get_latest_blockhash()
+                .get_latest_blockhash_with_commitment(CommitmentConfig::finalized())
                 .await
                 .unwrap();
+
+            info!("Last valid block height: {}", lastValidBlockHeight);
 
             let transaction = Transaction::new_signed_with_payer(
                 &instructions,
@@ -472,25 +451,109 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
                 recent_blockhash,
             );
 
-            match client_arc_clone
+            let mut latest_block_height = client_arc_clone
                 .read()
                 .await
-                .send_and_confirm_transaction_with_spinner_and_config(
-                    &transaction,
-                    CommitmentConfig::processed(),
-                    RpcSendTransactionConfig {
-                        skip_preflight: true,
-                        ..RpcSendTransactionConfig::default()
-                    },
-                )
+                .get_block_height_with_commitment(CommitmentConfig::finalized())
                 .await
-            {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    log_transaction(&transaction.signatures[0]).await;
-                    return Err(anyhow!("Transaction failed: {}", e));
+                .unwrap();
+
+            while latest_block_height < lastValidBlockHeight - 150 {
+                info!(
+                    "Last valid block height: {} Latest block {}",
+                    lastValidBlockHeight, latest_block_height
+                );
+                info!("Sending transaction..");
+                match client_arc_clone
+                    .read()
+                    .await
+                    .send_transaction_with_config(
+                        &transaction,
+                        RpcSendTransactionConfig {
+                            skip_preflight: false,
+                            max_retries: Some(0),
+                            preflight_commitment: Some(
+                                solana_sdk::commitment_config::CommitmentLevel::Confirmed,
+                            ),
+                            ..RpcSendTransactionConfig::default()
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => info!("Transaction sent successfully"),
+                    Err(e) => {
+                        if let Some(tx_err) = e.get_transaction_error() {
+                            error!("Transaction failed 1: {}", tx_err);
+                            if tx_err == solana_sdk::transaction::TransactionError::AlreadyProcessed
+                            {
+                                info!("Processed!..");
+                                break;
+                            } else if tx_err
+                                == solana_sdk::transaction::TransactionError::BlockhashNotFound
+                            {
+                                info!("Blockhash not found!..");
+                                break;
+                            }
+                        } else {
+                            error!("Transaction failed 2: {}", e);
+
+                            dbg!(e);
+                        }
+
+                        //log_transaction(&transaction.signatures[0]).await;
+                        //return Err(anyhow!("Transaction failed: {}", e));
+                    }
                 }
+
+                latest_block_height = client_arc_clone
+                    .read()
+                    .await
+                    .get_block_height_with_commitment(CommitmentConfig::finalized())
+                    .await
+                    .unwrap();
+
+                tokio::time::sleep(Duration::from_millis(1000)).await;
             }
+
+            // Ok(())
+
+            // let response = client_arc_clone
+            //     .read()
+            //     .await
+            //     .simulate_transaction(&transaction)
+            //     .await?;
+            // if response.value.err.is_some() {
+            //     error!("Transaction simulation failed: {:?}", response.value.err);
+            //     return Err(anyhow!(
+            //         "Transaction simulation failed: {:?}",
+            //         response.value.err
+            //     ));
+            // }
+            // let cu = response.value.units_consumed.unwrap();
+            // info!(
+            //     "Transaction simulation successful. Consumed {} compute units",
+            //     cu
+            // );
+            // if cu > COMPUTE_UNIT_LIMIT as u64 {
+            //     error!("Transaction simulation failed: Exceeded compute unit limit");
+            //     return Err(anyhow!(
+            //         "Transaction simulation failed: Exceeded compute unit limit"
+            //     ));
+            // }
+
+            // let budget_ins =
+            //     solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(
+            //         COMPUTE_UNIT_LIMIT,
+            //     );
+
+            // instructions(budget_ins);
+
+            /*
+            you're most likely getting the blockhash not found error due to the network congestion — a lot of other users are experiencing the same issue. these best practices have helped other users improve their ability to land transactions:
+            send your transactions with maxRetries = 0 and preflight = true
+            poll transaction status with different commitment levels and keep sending the same signed transaction until it gets confirmed using exponential backoff
+            abort your transaction if the block height goes over the lastValidBlockHeight
+            */
         });
 
         jobs.push(t1);
@@ -501,9 +564,9 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
     for result in results {
         match result {
             Ok(result) => {
-                if let Err(e) = result {
-                    println!("A task encountered an error: {}", e);
-                }
+                // if let Err(e) = result {
+                //     println!("A task encountered an error: {}", e);
+                // }
             }
             Err(e) => println!("A task encountered an error: {}", e),
         }
@@ -512,6 +575,50 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
     println!("All tasks completed");
 
     Ok(())
+}
+
+async fn initialize_instructions(user: &Pubkey) -> Vec<Instruction> {
+    let mut instructions: Vec<Instruction> = vec![];
+
+    // let rpc_url = "https://api.mainnet-beta.solana.com".to_string();
+    // let rpc_client = RpcClient::new(rpc_url);
+
+    // let fees = rpc_client.get_recent_prioritization_fees(&[*user]).await;
+
+    // if let Ok(fees) = fees {
+    //     dbg!(&fees);
+
+    //     let fee = fees.get(0).unwrap();
+    //     // let fee_instruction = solana_sdk::system_instruction::transfer(
+    //     //     &user,
+    //     //     &solana_sdk::sysvar::fees::id(),
+    //     //     fee.prioritization_fee,
+    //     // );
+
+    //     // instructions.push(fee_instruction);
+
+    //     info!("Setting compute unit price to {}", fee.prioritization_fee);
+    //     let price_ins =
+    //         solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(
+    //             fee.prioritization_fee,
+    //         );
+
+    //     //instructions.push(price_ins);
+    // }
+
+    let price_ins = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(
+        COMPUTE_UNIT_PRICE,
+    );
+
+    instructions.push(price_ins);
+
+    let budget_ins = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(
+        COMPUTE_UNIT_LIMIT,
+    );
+
+    instructions.push(budget_ins);
+
+    instructions
 }
 
 async fn fetch_pools(output_file: &str) -> anyhow::Result<()> {

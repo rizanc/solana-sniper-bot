@@ -9,13 +9,13 @@ use log::{debug, error, info};
 
 use raydium_contract_instructions::amm_instruction as amm;
 
-pub const COMPUTE_UNIT_PRICE: u64 = 150_000;
-pub const COMPUTE_UNIT_LIMIT: u32 = 150_969;
+pub const COMPUTE_UNIT_PRICE: u64 = 1_117_148;
+pub const COMPUTE_UNIT_LIMIT: u32 = 447_568;
 
 use std::{sync::Arc, vec};
 
 use solana_client::{
-    nonblocking::rpc_client::RpcClient, rpc_config::RpcSendTransactionConfig, rpc_request::RpcError,
+    nonblocking::rpc_client::RpcClient, rpc_config::RpcSendTransactionConfig
 };
 
 use solana_sdk::{
@@ -33,7 +33,7 @@ use tokio::time::Duration;
 
 use spl_token_client::token::{Token, TokenError};
 
-use crate::api::{base_unit, log_transaction};
+use crate::api::base_unit;
 
 #[derive(Debug, Parser)]
 pub struct Cli {
@@ -43,6 +43,7 @@ pub struct Cli {
 
 #[derive(Debug, Parser)]
 pub enum Command {
+    Initialize,
     Swap {
         #[arg(
             long,
@@ -77,6 +78,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Initialize => {
+            initialize();
+        } 
         Command::Swap {
             configuration_file,
             pools,
@@ -92,6 +96,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn initialize() {
+    todo!()
 }
 
 async fn exchange_rate(configuration_file: &str) -> anyhow::Result<()> {
@@ -237,7 +245,8 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
         &swap_params.out_token,
         None,
         Arc::new(api::keypair_clone(&keypair)),
-    ).with_compute_unit_price(COMPUTE_UNIT_PRICE)
+    )
+    .with_compute_unit_price(COMPUTE_UNIT_PRICE)
     .with_compute_unit_limit(COMPUTE_UNIT_LIMIT);
 
     let user_in_token_account = in_token_client.get_associated_token_address(&user);
@@ -381,7 +390,7 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
             &user_out_token_account,
             &user,
             swap_amount_in,
-            min_expected_out as u64,
+            min_expected_out,
         )?;
         instructions.push(swap_instruction);
     } else {
@@ -413,7 +422,7 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
             &user_out_token_account,
             &user,
             swap_amount_in,
-            min_expected_out as u64,
+            min_expected_out,
         )?;
         instructions.push(swap_instruction);
     }
@@ -435,14 +444,14 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
             let instructions = instructions_arc_clone.read().await;
             let keypair = key_pair_arc_clone.read().await;
 
-            let (recent_blockhash, lastValidBlockHeight) = client_arc_clone
+            let (recent_blockhash, last_valid_block_height) = client_arc_clone
                 .read()
                 .await
                 .get_latest_blockhash_with_commitment(CommitmentConfig::finalized())
                 .await
                 .unwrap();
 
-            info!("Last valid block height: {}", lastValidBlockHeight);
+            info!("Last valid block height: {}", last_valid_block_height);
 
             let transaction = Transaction::new_signed_with_payer(
                 &instructions,
@@ -458,10 +467,10 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
                 .await
                 .unwrap();
 
-            while latest_block_height < lastValidBlockHeight - 150 {
+            while latest_block_height < last_valid_block_height - 150 {
                 info!(
                     "Last valid block height: {} Latest block {}",
-                    lastValidBlockHeight, latest_block_height
+                    last_valid_block_height, latest_block_height
                 );
                 info!("Sending transaction..");
                 match client_arc_clone
@@ -512,7 +521,7 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
                     .await
                     .unwrap();
 
-                tokio::time::sleep(Duration::from_millis(1000)).await;
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
 
             // Ok(())
@@ -547,13 +556,6 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
             //     );
 
             // instructions(budget_ins);
-
-            /*
-            you're most likely getting the blockhash not found error due to the network congestion — a lot of other users are experiencing the same issue. these best practices have helped other users improve their ability to land transactions:
-            send your transactions with maxRetries = 0 and preflight = true
-            poll transaction status with different commitment levels and keep sending the same signed transaction until it gets confirmed using exponential backoff
-            abort your transaction if the block height goes over the lastValidBlockHeight
-            */
         });
 
         jobs.push(t1);
@@ -563,7 +565,7 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
 
     for result in results {
         match result {
-            Ok(result) => {
+            Ok(_result) => {
                 // if let Err(e) = result {
                 //     println!("A task encountered an error: {}", e);
                 // }
@@ -577,7 +579,7 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn initialize_instructions(user: &Pubkey) -> Vec<Instruction> {
+async fn initialize_instructions(_user: &Pubkey) -> Vec<Instruction> {
     let mut instructions: Vec<Instruction> = vec![];
 
     // let rpc_url = "https://api.mainnet-beta.solana.com".to_string();

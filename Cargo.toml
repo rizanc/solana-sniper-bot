@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anchor-client = "0.29.0"
 anyhow = "1.0.75"
+bs58 = "0.5.1"
 clap = { version = "4.4.11", features = ["derive"] }
 env_logger = "0.11.1"
 futures = "0.3"

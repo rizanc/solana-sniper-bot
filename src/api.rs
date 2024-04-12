@@ -1,14 +1,13 @@
 use std::{sync::Arc, time::Duration};
 
-use log::{debug, error, info};
+use log::{debug, info};
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::ClientBuilder;
 use serde::{Deserialize, Serialize};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::signature::{Keypair, Signature};
+use solana_sdk::signature::Keypair;
 
 use solana_sdk::pubkey::Pubkey;
-use solana_transaction_status::option_serializer::OptionSerializer;
 use spl_token_client::client::{ProgramClient, ProgramRpcClient, ProgramRpcClientSendTransaction};
 use tokio::{fs::File, io::AsyncReadExt};
 
@@ -240,42 +239,42 @@ pub fn program_rpc(rpc: Arc<RpcClient>) -> Arc<dyn ProgramClient<ProgramRpcClien
     program_client
 }
 
-pub async fn log_transaction(signature: &Signature) {
-    let rpc_url = "https://api.mainnet-beta.solana.com".to_string();
-    let rpc_client = RpcClient::new(rpc_url);
+// pub async fn log_transaction(signature: &Signature) {
+//     let rpc_url = "https://api.mainnet-beta.solana.com".to_string();
+//     let rpc_client = RpcClient::new(rpc_url);
 
-    for _ in 0..10 {
-        match rpc_client
-            .get_transaction(
-                &signature,
-                solana_transaction_status::UiTransactionEncoding::Base64,
-            )
-            .await
-        {
-            Ok(transaction_status) => match transaction_status.transaction.meta {
-                Some(meta) => {
-                    match meta.log_messages {
-                        OptionSerializer::Some(log) => {
-                            for l in log.iter() {
-                                error!("{}", l);
-                            }
-                            break;
-                        }
-                        _ => (),
-                    };
-                }
-                None => {
-                    error!("Transaction meta not found");
-                    break;
-                }
-            },
-            Err(_) => (),
-        }
+//     for _ in 0..10 {
+//         match rpc_client
+//             .get_transaction(
+//                 &signature,
+//                 solana_transaction_status::UiTransactionEncoding::Base64,
+//             )
+//             .await
+//         {
+//             Ok(transaction_status) => match transaction_status.transaction.meta {
+//                 Some(meta) => {
+//                     match meta.log_messages {
+//                         OptionSerializer::Some(log) => {
+//                             for l in log.iter() {
+//                                 error!("{}", l);
+//                             }
+//                             break;
+//                         }
+//                         _ => (),
+//                     };
+//                 }
+//                 None => {
+//                     error!("Transaction meta not found");
+//                     break;
+//                 }
+//             },
+//             Err(_) => (),
+//         }
 
-        error!("Waiting for Transaction Status. Retrying in 1 second");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-}
+//         error!("Waiting for Transaction Status. Retrying in 1 second");
+//         tokio::time::sleep(Duration::from_secs(1)).await;
+//     }
+// }
 
 pub fn base_unit(input_decimals: u8) -> f64 {
     let base: f64 = 10.0;

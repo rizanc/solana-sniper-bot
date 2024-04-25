@@ -8,15 +8,14 @@ use futures::future::join_all;
 use log::{debug, error, info};
 
 use raydium_contract_instructions::amm_instruction as amm;
+use serde_json::json;
 
 pub const COMPUTE_UNIT_PRICE: u64 = 1_117_148;
 pub const COMPUTE_UNIT_LIMIT: u32 = 447_568;
 
 use std::{sync::Arc, vec};
 
-use solana_client::{
-    nonblocking::rpc_client::RpcClient, rpc_config::RpcSendTransactionConfig
-};
+use solana_client::{nonblocking::rpc_client::RpcClient, rpc_config::RpcSendTransactionConfig};
 
 use solana_sdk::{
     commitment_config::CommitmentConfig,
@@ -28,8 +27,8 @@ use solana_sdk::{
 };
 
 use api::Settings;
-use tokio::sync::RwLock;
 use tokio::time::Duration;
+use tokio::sync::RwLock;
 
 use spl_token_client::token::{Token, TokenError};
 
@@ -80,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Initialize => {
             initialize();
-        } 
+        }
         Command::Swap {
             configuration_file,
             pools,
@@ -88,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
             swap(&configuration_file, &pools).await?;
         }
         Command::CachePools { output_file } => {
-            fetch_pools(&output_file).await?;
+            api::pool::fetch_pools(&output_file).await?;
         }
         Command::Exchange { configuration_file } => {
             exchange_rate(&configuration_file).await?;
@@ -195,29 +194,46 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
     );
 
     let user = keypair.pubkey();
+    let pool_info = api::pool::load_token_pool_from_file(&format!("{}.json", swap_params.out_token.to_string())).await;
 
-    let pool_info = match api::get_pool_info(
-        &swap_params.in_token,
-        &swap_params.out_token,
-        Some(pools.to_owned()),
-        true,
-    )
-    .await?
-    {
-        Some(info) => info,
-        None => {
-            error!(
-                "Failed to find pool in any specified direction for {}/{} pair",
-                swap_params.in_token, swap_params.out_token
-            );
-            return Err(anyhow!(
-                "Failed to find pool for {}/{} pair",
-                swap_params.in_token,
-                swap_params.out_token
-            ));
+    let pool_info = match pool_info {
+        Ok(pool_info) => pool_info,
+        Err(e) => {
+            let l = api::pool::get_pool_info(
+                &swap_params.in_token,
+                &swap_params.out_token,
+                Some(pools.to_owned()),
+                true,
+            ).await?;
+
+            match l{
+                Some(pool_info) => {
+
+                    dbg!(json!(&pool_info));
+
+                    if let Err(e) = api::pool::save_token_pool_to_file(&pool_info).await {
+                        error!("Failed to save pool info: {}", e);
+                    }
+
+                    pool_info
+
+                },
+                None => {
+
+                    error!(
+                        "Failed to find pool in any specified direction for {}/{} pair",
+                        swap_params.in_token, swap_params.out_token
+                    );
+                    return Err(anyhow!(
+                        "Failed to find pool for {}/{} pair",
+                        swap_params.in_token,
+                        swap_params.out_token
+                    ));
+                }
+            }
+            
         }
     };
-    debug!("Retrieved pool_info={:?}", pool_info);
 
     let mut instructions = initialize_instructions(&user).await;
 
@@ -322,12 +338,10 @@ async fn swap(configuration_file: &str, pools: &str) -> anyhow::Result<()> {
         Err(error) => error!("Error retrieving user's output-tokens ATA: {}", error),
     }
 
-    let in_token_price =
-        api::get_price_birdeye(&swap_params.in_token, &swap_params.birdeye_key).await?;
+    let in_token_price = api::get_price_birdeye(&swap_params.in_token, &swap_params.birdeye_key).await?;
     info!("Current price of 1 input token= {} USD", in_token_price);
 
-    let out_token_price =
-        api::get_price_birdeye(&swap_params.out_token, &swap_params.birdeye_key).await?;
+    let out_token_price = api::get_price_birdeye(&swap_params.out_token, &swap_params.birdeye_key).await?;
     info!("Current price of 1 output token= {} USD", out_token_price);
 
     let input_decimals = in_token_client.get_mint_info().await?.base.decimals;
@@ -623,9 +637,5 @@ async fn initialize_instructions(_user: &Pubkey) -> Vec<Instruction> {
     instructions
 }
 
-async fn fetch_pools(output_file: &str) -> anyhow::Result<()> {
-    let pool_info = api::fetch_all_liquidity_pools().await?;
-    std::fs::write(output_file, serde_json::to_string(&pool_info)?)?;
 
-    Ok(())
-}
+

@@ -12,7 +12,7 @@ use spl_token_client::client::{ProgramClient, ProgramRpcClient, ProgramRpcClient
 use tokio::{fs::File, io::AsyncReadExt};
 
 pub const RAYDIUM_POOL_INFO_ENDPOINT: &str = "https://api.raydium.io/v2/sdk/liquidity/mainnet.json";
-pub const BIRDEYE_API_ENDPOINT: &str = "https://public-api.birdeye.so/public/price?address=";
+pub const BIRDEYE_API_ENDPOINT: &str = "https://public-api.birdeye.so/defi/price?address=";
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct LiqPoolInformation {
@@ -136,18 +136,6 @@ pub async fn read_swap_params(path: &str) -> anyhow::Result<Settings> {
     Ok(swap_params)
 }
 
-pub async fn fetch_all_liquidity_pools() -> anyhow::Result<LiqPoolInformation> {
-    debug!("fn: fetch_all_liquidity_pools");
-    info!(
-        "Fetching LP infos from raydium api endpoint={}",
-        RAYDIUM_POOL_INFO_ENDPOINT
-    );
-    Ok(reqwest::get(RAYDIUM_POOL_INFO_ENDPOINT)
-        .await?
-        .json()
-        .await?)
-}
-
 pub async fn get_price_birdeye(token: &Pubkey, key: &str) -> anyhow::Result<f64> {
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", HeaderValue::from_str(key)?);
@@ -183,46 +171,6 @@ pub async fn get_price_birdeye(token: &Pubkey, key: &str) -> anyhow::Result<f64>
     }
 }
 
-pub async fn get_pool_info(
-    token_a: &Pubkey,
-    token_b: &Pubkey,
-    cache_path: Option<String>,
-    allow_unofficial: bool,
-) -> anyhow::Result<Option<LiquidityPool>> {
-    debug!(
-        "fn: get_pool_info(token_a={},token_b={},cache_path={:?})",
-        token_a, token_b, cache_path
-    );
-    let pools = if let Some(path) = cache_path {
-        debug!("Fetching liq-pool-infos from pool-cache. path={}", path);
-        serde_json::from_str(&std::fs::read_to_string(path)?)?
-    } else {
-        fetch_all_liquidity_pools().await?
-    };
-
-    let mut pools: Box<dyn Iterator<Item = _>> = if allow_unofficial {
-        Box::new(
-            pools
-                .official
-                .into_iter()
-                .chain(pools.unofficial.into_iter()),
-        )
-    } else {
-        Box::new(pools.official.into_iter())
-    };
-
-    match pools.find(|pool| {
-        (pool.base_mint == *token_b && pool.quote_mint == *token_a)
-            || (pool.base_mint == *token_a && pool.quote_mint == *token_b)
-    }) {
-        Some(pool) => Ok(Some(pool)),
-        None => Err(anyhow::anyhow!(
-            "Failed to find pool for token_a={} and token_b={}",
-            token_a,
-            token_b
-        )),
-    }
-}
 
 pub fn keypair_clone(kp: &Keypair) -> Keypair {
     Keypair::from_bytes(&kp.to_bytes()).expect("failed to copy keypair")
@@ -280,4 +228,104 @@ pub fn base_unit(input_decimals: u8) -> f64 {
     let base: f64 = 10.0;
     let exponent = input_decimals;
     base.powf(exponent as f64)
+}
+
+pub mod pool {
+    use super::*;
+
+    
+    pub async fn get_pool_info(
+        token_a: &Pubkey,
+        token_b: &Pubkey,
+        cache_path: Option<String>,
+        allow_unofficial: bool,
+    ) -> anyhow::Result<Option<LiquidityPool>> {
+        debug!(
+            "fn: get_pool_info(token_a={},token_b={},cache_path={:?})",
+            token_a, token_b, cache_path
+        );
+        let pools = if let Some(path) = cache_path {
+            debug!("Fetching liq-pool-infos from pool-cache. path={}", path);
+            serde_json::from_str(&std::fs::read_to_string(path)?)?
+        } else {
+            fetch_all_liquidity_pools().await?
+        };
+    
+        let mut pools: Box<dyn Iterator<Item = _>> = if allow_unofficial {
+            Box::new(
+                pools
+                    .official
+                    .into_iter()
+                    .chain(pools.unofficial.into_iter()),
+            )
+        } else {
+            Box::new(pools.official.into_iter())
+        };
+    
+        match pools.find(|pool| {
+            (pool.base_mint == *token_b && pool.quote_mint == *token_a)
+                || (pool.base_mint == *token_a && pool.quote_mint == *token_b)
+        }) {
+            Some(pool) => Ok(Some(pool)),
+            None => Err(anyhow::anyhow!(
+                "Failed to find pool for token_a={} and token_b={}",
+                token_a,
+                token_b
+            )),
+        }
+    }
+    
+
+    pub async fn fetch_all_liquidity_pools() -> anyhow::Result<LiqPoolInformation> {
+        debug!("fn: fetch_all_liquidity_pools");
+        info!(
+            "Fetching LP infos from raydium api endpoint={}",
+            RAYDIUM_POOL_INFO_ENDPOINT
+        );
+        Ok(reqwest::get(RAYDIUM_POOL_INFO_ENDPOINT)
+            .await?
+            .json()
+            .await?)
+    }
+
+
+    pub async fn fetch_pools(output_file: &str) -> anyhow::Result<()> {
+        let pool_info = fetch_all_liquidity_pools().await?;
+        std::fs::write(output_file, serde_json::to_string(&pool_info)?)?;
+
+        Ok(())
+    }
+
+ 
+    pub async fn save_token_pool_to_file(
+        pool_info: &LiquidityPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let file_path = pool_info.base_mint.to_string() + ".json";
+        let json = serde_json::to_string(pool_info)?;
+
+        tokio::fs::write(file_path, json).await?;
+        Ok(())
+    }
+
+    
+    pub async fn load_token_pool_from_file(
+        file_path: &str,
+    ) -> Result<LiquidityPool, Box<dyn std::error::Error>> {
+        // Check if the file exists
+        if tokio::fs::metadata(file_path).await.is_ok() {
+            let mut file = File::open(file_path).await?;
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).await?;
+
+            // Deserialize the JSON content into a Rust object
+            let pool_info: LiquidityPool = serde_json::from_str(&contents)?;
+            Ok(pool_info)
+        } else {
+            dbg!(&file_path);
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "File not found@",
+            )))
+        }
+    }
 }

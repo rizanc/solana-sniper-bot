@@ -115,7 +115,11 @@ pub struct Settings {
     pub in_token: Pubkey,
     #[serde(with = "pubkey")]
     pub out_token: Pubkey,
+    #[serde(with = "pubkey")]
+    pub token_program_id: Pubkey,
     pub amount_in: u64,
+    pub min_snipe_out_amount: Option<u64>,
+    pub pct_to_snipe_out: Option<f64>,
     pub slippage: f32,
     pub threads: u8,
     pub rpc_url: String,
@@ -170,7 +174,6 @@ pub async fn get_price_birdeye(token: &Pubkey, key: &str) -> anyhow::Result<f64>
         }
     }
 }
-
 
 pub fn keypair_clone(kp: &Keypair) -> Keypair {
     Keypair::from_bytes(&kp.to_bytes()).expect("failed to copy keypair")
@@ -233,7 +236,6 @@ pub fn base_unit(input_decimals: u8) -> f64 {
 pub mod pool {
     use super::*;
 
-    
     pub async fn get_pool_info(
         token_a: &Pubkey,
         token_b: &Pubkey,
@@ -250,7 +252,7 @@ pub mod pool {
         } else {
             fetch_all_liquidity_pools().await?
         };
-    
+
         let mut pools: Box<dyn Iterator<Item = _>> = if allow_unofficial {
             Box::new(
                 pools
@@ -261,7 +263,7 @@ pub mod pool {
         } else {
             Box::new(pools.official.into_iter())
         };
-    
+
         match pools.find(|pool| {
             (pool.base_mint == *token_b && pool.quote_mint == *token_a)
                 || (pool.base_mint == *token_a && pool.quote_mint == *token_b)
@@ -274,7 +276,6 @@ pub mod pool {
             )),
         }
     }
-    
 
     pub async fn fetch_all_liquidity_pools() -> anyhow::Result<LiqPoolInformation> {
         debug!("fn: fetch_all_liquidity_pools");
@@ -288,7 +289,6 @@ pub mod pool {
             .await?)
     }
 
-
     pub async fn fetch_pools(output_file: &str) -> anyhow::Result<()> {
         let pool_info = fetch_all_liquidity_pools().await?;
         std::fs::write(output_file, serde_json::to_string(&pool_info)?)?;
@@ -296,18 +296,18 @@ pub mod pool {
         Ok(())
     }
 
- 
     pub async fn save_token_pool_to_file(
+        settings: &Settings,
         pool_info: &LiquidityPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let file_path = pool_info.base_mint.to_string() + ".json";
+
+        let file_path = format!("./pools/{}.json", settings.out_token.to_string());
         let json = serde_json::to_string(pool_info)?;
 
         tokio::fs::write(file_path, json).await?;
         Ok(())
     }
 
-    
     pub async fn load_token_pool_from_file(
         file_path: &str,
     ) -> Result<LiquidityPool, Box<dyn std::error::Error>> {
@@ -321,10 +321,9 @@ pub mod pool {
             let pool_info: LiquidityPool = serde_json::from_str(&contents)?;
             Ok(pool_info)
         } else {
-            dbg!(&file_path);
             Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "File not found@",
+                "File not found",
             )))
         }
     }

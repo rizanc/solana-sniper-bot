@@ -9,6 +9,7 @@ use solana_sdk::signature::Keypair;
 
 use solana_sdk::pubkey::Pubkey;
 use spl_token_client::client::{ProgramClient, ProgramRpcClient, ProgramRpcClientSendTransaction};
+// use spl_token_client::client::{ProgramClient, ProgramRpcClient, ProgramRpcClientSendTransaction};
 use tokio::{fs::File, io::AsyncReadExt};
 
 pub const RAYDIUM_POOL_INFO_ENDPOINT: &str = "https://api.raydium.io/v2/sdk/liquidity/mainnet.json";
@@ -123,6 +124,7 @@ pub struct Settings {
     pub slippage: f32,
     pub threads: u8,
     pub rpc_url: String,
+    pub ws_url: String,
     pub birdeye_key: String,
 }
 

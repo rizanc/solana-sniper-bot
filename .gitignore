@@ -8,3 +8,7 @@ Cargo.lock
 cached.json
 settings.json
 pool_cache.json
+pools/
+pool_info.json
+bot
+bot_release

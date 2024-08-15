@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+solana-receiver={ path = "/home/rizanc/solana-receiver" }
 anchor-client = "0.29.0"
 anyhow = "1.0.75"
 bs58 = "0.5.1"
@@ -20,5 +21,7 @@ solana-sdk = "1.18.9"
 solana-transaction-status = "1.18.9"
 spl-associated-token-account = "3.0.2"
 spl-token = "4.0.0"
-spl-token-client = "0.9.2"
+
 tokio = { version = "1.35.0", features = ["full"] }
+tokio-stream = "0.1.15"
+spl-token-client = "0.10.0"

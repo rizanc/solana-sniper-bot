@@ -11,7 +11,7 @@ use futures::future::join_all;
 use log::{debug, error, info};
 
 use raydium_contract_instructions::amm_instruction as amm;
-use solana_receiver::{raydium::get_price, requests::monitor_account};
+use solana_receiver::{raydium::get_price, requests::{monitor_account, QuickTransactionInfo, QuickTransactionType}};
 
 pub const COMPUTE_UNIT_PRICE: u64 = 200_000;
 pub const COMPUTE_UNIT_LIMIT: ComputeUnitLimit = ComputeUnitLimit::Default;
@@ -157,28 +157,33 @@ async fn monitor(configuration_file: &str) -> anyhow::Result<()> {
             Ok(transaction_info) => {
                 info!("{:?}", &transaction_info);
 
-                let mut mint = Pubkey::from_str(transaction_info.accounts.get(8).unwrap()).unwrap();
-                if mint == Pubkey::from_str("So11111111111111111111111111111111111111112")? {
-                    mint = Pubkey::from_str(transaction_info.accounts.get(9).unwrap()).unwrap();
+                if let QuickTransactionType::RaydiumInitialize { ref accounts, ref amm } = transaction_info.transaction_type {
+                    let mut mint = Pubkey::from_str(accounts.get(8).unwrap()).unwrap();
+
+                    if mint == Pubkey::from_str("So11111111111111111111111111111111111111112")? {
+                        mint = Pubkey::from_str(accounts.get(9).unwrap()).unwrap();
+                    }
+    
+                    match swap(configuration_file, "pool_cache.json", Some(mint)).await {
+                        Ok(_) => {
+                            info!("Swap successful");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            match snipe_out(configuration_file, "pool_cache.json", Some(mint)).await {
+                                Ok(_) => {
+                                    info!("Snipe out successful");
+                                }
+                                Err(e) => {
+                                    error!("Error sniping out: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error swapping: {}", e);
+                        }
+                    }
                 }
 
-                match swap(configuration_file, "pool_cache.json", Some(mint)).await {
-                    Ok(_) => {
-                        info!("Swap successful");
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        // match snipe_out(configuration_file, "pool_cache.json", Some(mint)).await {
-                        //     Ok(_) => {
-                        //         info!("Snipe out successful");
-                        //     }
-                        //     Err(e) => {
-                        //         error!("Error sniping out: {}", e);
-                        //     }
-                        // }
-                    }
-                    Err(e) => {
-                        error!("Error swapping: {}", e);
-                    }
-                }
+                
             }
             Err(e) => {
                 error!("Error monitoring account: {}", e);
